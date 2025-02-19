@@ -78,6 +78,32 @@ export default function undebug() {
         ) {
           instances.push(p.node.id.name)
           p.remove()
+        } else if (
+          p.node.init.type === 'Identifier' &&
+          instances.includes(p.node.init.name)
+        ) {
+          // Add the alias to our instances array
+          instances.push(p.node.id.name)
+          p.remove()
+        }
+      },
+      MemberExpression(p, state) {
+        const instances = /** @type {string[]} */ (
+          state.undebugInstances || (state.undebugInstances = [])
+        )
+
+        // Check if accessing property on a debug instance
+        // e.g. log.enabled, log.color, log.namespace, etc.
+        if (
+          p.node.type === 'MemberExpression' &&
+          p.node.object.type === 'Identifier' &&
+          instances.includes(p.node.object.name)
+        ) {
+          // Replace the member expression with undefined
+          p.replaceWith({
+            type: 'Identifier',
+            name: 'undefined'
+          })
         }
       }
     }
