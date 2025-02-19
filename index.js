@@ -82,7 +82,6 @@ export default function undebug() {
           p.node.init.type === 'Identifier' &&
           instances.includes(p.node.init.name)
         ) {
-          // Add the alias to our instances array
           instances.push(p.node.id.name)
           p.remove()
         } else if (
@@ -90,7 +89,6 @@ export default function undebug() {
           p.node.init.object.type === 'Identifier' &&
           instances.includes(p.node.init.object.name)
         ) {
-          // Add the method reference to our instances array
           instances.push(p.node.id.name)
           p.remove()
         }
@@ -104,12 +102,12 @@ export default function undebug() {
           p.node.object.type === 'Identifier' &&
           instances.includes(p.node.object.name)
         ) {
-          // Check if this member expression is being used as a function call
           if (
+            // Check if this member expression is being used as a function call
+            // and remove the whole call. e.g. log.log("").
             p.parent.type === 'CallExpression' &&
             p.parent.callee === p.node
           ) {
-            // If it's a method call like log.log(""), remove the whole call
             p.parentPath.remove()
           } else {
             // Otherwise accessing property on a debug instance, replace with
