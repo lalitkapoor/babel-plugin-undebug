@@ -58,14 +58,6 @@ test('babel-plugin-undebug', function () {
 
   assert.equal(
     transform(
-      'import {debug as d} from "debug"; var a = d("a"); console.log("is a.enabled?", a.enabled)'
-    ),
-    'console.log("is a.enabled?", undefined);',
-    'should replace member expressions with undefined'
-  )
-
-  assert.equal(
-    transform(
       'import {debug as d} from "debug"; var a = d("a"); var b = a; b("c");'
     ),
     '',
@@ -73,11 +65,41 @@ test('babel-plugin-undebug', function () {
   )
 
   assert.equal(
+    transform('import {debug as d} from "debug"; var a = d("a"); a.log("b");'),
+    '',
+    'should remove member property function calls'
+  )
+
+  assert.equal(
+    transform(
+      'import {debug as d} from "debug"; var a = d("a"); console.log("is a.enabled?", a.enabled)'
+    ),
+    'console.log("is a.enabled?", undefined);',
+    'should replace member properties with undefined'
+  )
+
+  assert.equal(
     transform(
       'import {debug as d} from "debug"; var a = d("a"); var b = a; console.log("is b.enabled?", b.enabled)'
     ),
     'console.log("is b.enabled?", undefined);',
-    'should replace aliased member expressions with undefined'
+    'should replace aliased member properties with undefined'
+  )
+
+  assert.equal(
+    transform(
+      'import {debug as d} from "debug"; var a = d("a"); var b = a.log; b("c");'
+    ),
+    '',
+    'should remove aliased member property function calls'
+  )
+
+  assert.equal(
+    transform(
+      'import {debug as d} from "debug"; var a = d("a"); var b = a; b.log("c");'
+    ),
+    '',
+    'should remove alias that uses a member property'
   )
 })
 

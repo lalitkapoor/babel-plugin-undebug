@@ -85,6 +85,14 @@ export default function undebug() {
           // Add the alias to our instances array
           instances.push(p.node.id.name)
           p.remove()
+        } else if (
+          p.node.init.type === 'MemberExpression' &&
+          p.node.init.object.type === 'Identifier' &&
+          instances.includes(p.node.init.object.name)
+        ) {
+          // Add the method reference to our instances array
+          instances.push(p.node.id.name)
+          p.remove()
         }
       },
       MemberExpression(p, state) {
@@ -92,18 +100,25 @@ export default function undebug() {
           state.undebugInstances || (state.undebugInstances = [])
         )
 
-        // Check if accessing property on a debug instance
-        // e.g. log.enabled, log.color, log.namespace, etc.
         if (
-          p.node.type === 'MemberExpression' &&
           p.node.object.type === 'Identifier' &&
           instances.includes(p.node.object.name)
         ) {
-          // Replace the member expression with undefined
-          p.replaceWith({
-            type: 'Identifier',
-            name: 'undefined'
-          })
+          // Check if this member expression is being used as a function call
+          if (
+            p.parent.type === 'CallExpression' &&
+            p.parent.callee === p.node
+          ) {
+            // If it's a method call like log.log(""), remove the whole call
+            p.parentPath.remove()
+          } else {
+            // Otherwise accessing property on a debug instance, replace with
+            // undefined e.g. log.enabled, log.color, log.namespace, etc.
+            p.replaceWith({
+              type: 'Identifier',
+              name: 'undefined'
+            })
+          }
         }
       }
     }
