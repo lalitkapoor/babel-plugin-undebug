@@ -7,235 +7,184 @@ export default function ({types: t}) {
   return {
     name: 'remove-debug-imports',
     visitor: {
-      Program(path) {
-        const debugReferences = new Set()
-        const pathsToRemove = new Set()
+      Program: {
+        exit(path) {
+          // Tracks all identifiers that reference debug or debug instances
+          const debugBindings = new Set()
+          // Collects AST nodes that should be removed
+          const pathsToRemove = new Set()
+          // Tracks bindings from destructured debug objects
+          const destructuredBindings = new Set()
 
-        path.traverse({
-          /**
-           * Handle variable declarations including:
-           * Examples:
-           * - const debug = require('debug')
-           * - var log = require('debug')('app:log')
-           * - let log = debug('namespace')
-           *
-           * Tracks the created bindings and marks declarations for removal.
-           * All examples above will be removed entirely.
-           */
-          VariableDeclarator(path) {
-            const init = path.get('init')
-
-            // Handle require('debug')
-            if (
-              init.isCallExpression() &&
-              init.get('callee').isIdentifier({name: 'require'}) &&
-              init.node.arguments.length > 0 &&
-              init.node.arguments[0].value === 'debug'
-            ) {
-              const binding = path.scope.getBinding(path.node.id.name)
-              if (binding) {
-                debugReferences.add(binding)
-              }
-              const pathToRemove = getVariablePathToRemove(path)
-              pathToRemove && pathsToRemove.add(pathToRemove)
-            }
-
-            // Handle require('debug')('something')
-            if (init.isCallExpression()) {
-              const callee = init.get('callee')
+          // First find all debug imports/requires
+          path.traverse({
+            /**
+             * Handle require('debug') patterns including:
+             * Examples:
+             * - const debug = require('debug')
+             * - var log = require('debug')('app:log')
+             */
+            CallExpression(path) {
               if (
-                callee.isCallExpression() &&
-                callee.get('callee').isIdentifier({name: 'require'}) &&
-                callee.node.arguments.length > 0 &&
-                callee.node.arguments[0].value === 'debug'
+                path.get('callee').isIdentifier({name: 'require'}) &&
+                path.node.arguments[0]?.value === 'debug'
               ) {
-                const binding = path.scope.getBinding(path.node.id.name)
-                if (binding) {
-                  debugReferences.add(binding)
+                const parent = path.findParent((p) => p.isVariableDeclarator())
+                if (parent) {
+                  const binding = path.scope.getBinding(parent.node.id.name)
+                  if (binding) debugBindings.add(binding)
+                  const pathToRemove = getVariablePathToRemove(parent)
+                  pathToRemove && pathsToRemove.add(pathToRemove)
                 }
-                const pathToRemove = getVariablePathToRemove(path)
-                pathToRemove && pathsToRemove.add(pathToRemove)
               }
-            }
+            },
 
-            // Handle destructuring from debug
-            // Example: const {extend, enable} = debug;
-            if (path.node.id.type === 'ObjectPattern') {
-              // Check if init is debug reference
-              const binding =
-                init.isIdentifier() && path.scope.getBinding(init.node.name)
-              if (binding && debugReferences.has(binding)) {
-                // Track each destructured property binding
-                path.node.id.properties.forEach((prop) => {
-                  const binding = path.scope.getBinding(prop.value.name)
-                  if (binding) {
-                    debugReferences.add(binding)
-                  }
+            /**
+             * Handle ES6 imports of the debug module
+             * All import statements will be removed entirely
+             *
+             * Examples:
+             * - import * as debug from 'debug'
+             * - import debug from 'debug'
+             * - import { debug } from 'debug'
+             * - import { debug as d } from 'debug'
+             */
+            ImportDeclaration(path) {
+              if (path.node.source.value === 'debug') {
+                path.node.specifiers.forEach((specifier) => {
+                  const binding = path.scope.getBinding(specifier.local.name)
+                  if (binding) debugBindings.add(binding)
                 })
-                const pathToRemove = getVariablePathToRemove(path)
-                pathToRemove && pathsToRemove.add(pathToRemove)
+                pathsToRemove.add(path)
               }
             }
-          },
+          })
 
-          /**
-           * Handle ES6 imports of the debug module
-           * All import statements will be removed entirely
-           *
-           * Examples:
-           * - import * as debug from 'debug'
-           * - import debug from 'debug'
-           * - import { debug } from 'debug'
-           * - import { debug as d } from 'debug'
-           */
-          ImportDeclaration(path) {
-            if (path.node.source.value === 'debug') {
-              path.node.specifiers.forEach((specifier) => {
-                // Check for namespace imports (e.g., import * as debug from 'debug')
-                if (t.isImportNamespaceSpecifier(specifier)) {
-                  const binding = path.scope.getBinding(specifier.local.name)
-                  if (binding) {
-                    debugReferences.add(binding)
-                  }
-                } else {
-                  // Check for:
-                  // - default imports (import debug from 'debug')
-                  // - named imports (import { debug } from 'debug')
-                  // - aliased imports (import { debug as d } from 'debug')
-                  const binding = path.scope.getBinding(specifier.local.name)
-                  if (binding) {
-                    debugReferences.add(binding)
-                  }
-                }
-              })
-              pathsToRemove.add(path)
-            }
-          },
-
-          /**
-           * Handle identifier references to debug or debug-created functions
-           * Examples to be removed entirely:
-           * - log('message')               // direct call
-           * - const newLog = log           // aliasing
-           * - const sub = log.extend('sub') // method call assignment
-           *
-           * Examples where property access is replaced with undefined:
-           * - console.log(log.enabled)     // becomes console.log(undefined)
-           * - if (log.namespace === 'test') // becomes if (undefined === 'test')
-           */
-          Identifier(path) {
-            // Skip identifiers that are being declared
-            if (path.parentPath.isVariableDeclarator({id: path.node})) return
-
-            const binding = path.scope.getBinding(path.node.name)
-            if (binding && debugReferences.has(binding)) {
-              // If it's used in a call
-              // e.g., debug('test'), log('message')
-              if (path.parentPath.isCallExpression({callee: path.node})) {
-                pathsToRemove.add(path.parentPath.parentPath)
-              }
-
-              // If it's being assigned to another variable (aliased)
-              // e.g., const myDebug = debug, const log2 = log
-              const parentPath = path.parentPath
-              if (parentPath.isVariableDeclarator({init: path.node})) {
-                const newBinding = path.scope.getBinding(
-                  parentPath.node.id.name
-                )
-                if (newBinding) {
-                  debugReferences.add(newBinding)
-                }
-                const pathToRemove = getVariablePathToRemove(parentPath)
-                pathToRemove && pathsToRemove.add(pathToRemove)
-              }
-
-              // If it's used as object in a member expression
-              // e.g., debug.enable('ns'), log.namespace, debug.extend('sub')
-              if (path.parentPath.isMemberExpression({object: path.node})) {
-                const memberExp = path.parentPath
-
-                // Check if the member expression is part of a variable declaration
-                // e.g., const sub = log.extend, const ns = debug.namespace
-                const isInDeclaration = memberExp.findParent((p) =>
-                  p.isVariableDeclarator()
-                )
+          // Process all debug-related bindings to find and handle their usages
+          for (const binding of debugBindings) {
+            // For each place this binding is referenced in the code
+            for (const refPath of binding.referencePaths) {
+              /**
+               * Handle property access patterns including:
+               * Examples:
+               * - debug.enabled (replaced with undefined)
+               * - debug.extend('sub') (removed)
+               * - const x = debug.extend (removed)
+               */
+              if (
+                refPath.parentPath.isMemberExpression({object: refPath.node})
+              ) {
+                const memberExp = refPath.parentPath
 
                 if (
                   memberExp.parentPath.isCallExpression({
                     callee: memberExp.node
                   })
                 ) {
-                  // It's a method call (e.g., a.log())
+                  // Method call: debug.enable('ns')
+                  // Remove the entire statement containing this call
                   pathsToRemove.add(memberExp.parentPath.parentPath)
-                } else if (isInDeclaration) {
-                  // It's being assigned to a variable (e.g., var b = a.log)
-                  const declarator = isInDeclaration
+                } else if (
+                  memberExp.findParent((p) => p.isVariableDeclarator())
+                ) {
+                  // Assignment: const x = debug.extend
+                  const declarator = memberExp.findParent((p) =>
+                    p.isVariableDeclarator()
+                  )
                   const newBinding = declarator.scope.getBinding(
                     declarator.node.id.name
                   )
-                  if (newBinding) {
-                    debugReferences.add(newBinding)
-                  }
+                  if (newBinding) debugBindings.add(newBinding)
                   const pathToRemove = getVariablePathToRemove(declarator)
                   pathToRemove && pathsToRemove.add(pathToRemove)
                 } else {
-                  // It's used as a value (e.g., console.log(a.enabled))
+                  // Property access: console.log(debug.enabled)
                   memberExp.replaceWith(t.identifier('undefined'))
                 }
+                continue
               }
-            }
-          },
 
-          /**
-           * Handle function calls including:
-           * Examples to be removed entirely:
-           * - debug('app:log')             // direct debug call
-           * - log('message')               // call to debug function
-           * - log.extend('sub')('detail')  // chained calls
-           * - logger.log('test')           // method call
-           *
-           * Both the calls and their containing statements are removed.
-           */
-          CallExpression(path) {
-            const callee = path.get('callee')
-
-            // Handle direct calls
-            if (callee.isIdentifier()) {
-              const binding = path.scope.getBinding(callee.node.name)
-              if (binding && debugReferences.has(binding)) {
-                const parent = path.parentPath
-                if (parent.isVariableDeclarator()) {
-                  const newBinding = parent.scope.getBinding(
-                    parent.node.id.name
+              /**
+               * Handle direct debug calls including:
+               * Examples:
+               * - debug('test')
+               * - log('message')
+               * Both the calls and their containing statements are removed.
+               */
+              if (refPath.parentPath.isCallExpression({callee: refPath.node})) {
+                const callExp = refPath.parentPath
+                // If this call is part of a variable declaration, track the new binding
+                const declarator = callExp.findParent((p) =>
+                  p.isVariableDeclarator()
+                )
+                if (declarator) {
+                  const newBinding = declarator.scope.getBinding(
+                    declarator.node.id.name
                   )
-                  if (newBinding) {
-                    debugReferences.add(newBinding)
-                  }
-                  const pathToRemove = getVariablePathToRemove(parent)
+                  if (newBinding) debugBindings.add(newBinding)
+                  const pathToRemove = getVariablePathToRemove(declarator)
                   pathToRemove && pathsToRemove.add(pathToRemove)
                 } else {
-                  pathsToRemove.add(path.parentPath)
+                  // Otherwise remove the call statement
+                  pathsToRemove.add(callExp.parentPath)
                 }
+                continue
               }
-            }
 
-            // Handle method calls
-            if (callee.isMemberExpression()) {
-              const object = callee.get('object')
-              if (object.isIdentifier()) {
-                const binding = path.scope.getBinding(object.node.name)
-                if (binding && debugReferences.has(binding)) {
-                  pathsToRemove.add(path.parentPath)
+              /**
+               * Handle assignments and aliases:
+               * Examples:
+               * - const newDebug = debug
+               * - let log2 = log
+               */
+              if (
+                refPath.parentPath.isVariableDeclarator({init: refPath.node})
+              ) {
+                const declarator = refPath.parentPath
+                const newBinding = declarator.scope.getBinding(
+                  declarator.node.id.name
+                )
+                if (newBinding) debugBindings.add(newBinding)
+                const pathToRemove = getVariablePathToRemove(declarator)
+                pathToRemove && pathsToRemove.add(pathToRemove)
+              }
+
+              /**
+               * Handle destructuring patterns:
+               * Examples:
+               * - const { extend, enable } = debug
+               * - const { debug: d } = require('debug')
+               */
+              if (
+                refPath.parentPath.isVariableDeclarator({init: refPath.node})
+              ) {
+                const declarator = refPath.parentPath
+                // Check if the left-hand side is a destructuring pattern
+                if (t.isObjectPattern(declarator.node.id)) {
+                  // For each property in the object pattern, add its binding
+                  declarator.node.id.properties.forEach((prop) => {
+                    const binding = path.scope.getBinding(prop.value.name)
+                    if (binding) {
+                      debugBindings.add(binding)
+                    }
+                  })
+                } else {
+                  // Normal case (non-destructured)
+                  const newBinding = declarator.scope.getBinding(
+                    declarator.node.id.name
+                  )
+                  if (newBinding) debugBindings.add(newBinding)
                 }
+                const pathToRemove = getVariablePathToRemove(declarator)
+                pathToRemove && pathsToRemove.add(pathToRemove)
               }
             }
           }
-        })
 
-        // Remove all collected paths at the end
-        for (const path of pathsToRemove) {
-          if (path.node) {
-            path.remove()
+          // Final cleanup: Remove all collected paths in one pass. This is done
+          // at the end to avoid removing nodes while we're still traversing
+          for (const path of pathsToRemove) {
+            if (path.node) path.remove()
           }
         }
       }
