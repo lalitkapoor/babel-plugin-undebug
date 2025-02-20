@@ -87,6 +87,17 @@ test('babel-plugin-undebug', function () {
     'should support importing `debug` from debug and making instances later'
   )
 
+  // Test ES module namespace import
+  assertTransform(
+    `
+    import * as d from "debug";
+    var a = d("a");
+    a("b")
+    `,
+    '',
+    'should support importing `debug` as a namespace and making instances later'
+  )
+
   // Test non-debug require preservation
   assertTransform(
     `
@@ -130,6 +141,18 @@ test('babel-plugin-undebug', function () {
     f("g");
     `,
     'should not remove other calls'
+  )
+
+  // Test destructuring
+  assertTransform(
+    `
+  import debug from 'debug';
+  const {extend, enable} = debug;
+  const log = extend('sub');
+  enable('*');
+  `,
+    '',
+    'should handle destructuring'
   )
 
   // Test aliased callers

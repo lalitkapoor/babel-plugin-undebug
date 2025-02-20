@@ -57,23 +57,55 @@ export default function ({types: t}) {
                 pathToRemove && pathsToRemove.add(pathToRemove)
               }
             }
+
+            // Handle destructuring from debug
+            // Example: const {extend, enable} = debug;
+            if (path.node.id.type === 'ObjectPattern') {
+              // Check if init is debug reference
+              const binding =
+                init.isIdentifier() && path.scope.getBinding(init.node.name)
+              if (binding && debugReferences.has(binding)) {
+                // Track each destructured property binding
+                path.node.id.properties.forEach((prop) => {
+                  const binding = path.scope.getBinding(prop.value.name)
+                  if (binding) {
+                    debugReferences.add(binding)
+                  }
+                })
+                const pathToRemove = getVariablePathToRemove(path)
+                pathToRemove && pathsToRemove.add(pathToRemove)
+              }
+            }
           },
 
           /**
            * Handle ES6 imports of the debug module
+           * All import statements will be removed entirely
+           *
            * Examples:
+           * - import * as debug from 'debug'
            * - import debug from 'debug'
            * - import { debug } from 'debug'
            * - import { debug as d } from 'debug'
-           *
-           * All import statements will be removed entirely.
            */
           ImportDeclaration(path) {
             if (path.node.source.value === 'debug') {
               path.node.specifiers.forEach((specifier) => {
-                const binding = path.scope.getBinding(specifier.local.name)
-                if (binding) {
-                  debugReferences.add(binding)
+                // Check for namespace imports (e.g., import * as debug from 'debug')
+                if (t.isImportNamespaceSpecifier(specifier)) {
+                  const binding = path.scope.getBinding(specifier.local.name)
+                  if (binding) {
+                    debugReferences.add(binding)
+                  }
+                } else {
+                  // Check for:
+                  // - default imports (import debug from 'debug')
+                  // - named imports (import { debug } from 'debug')
+                  // - aliased imports (import { debug as d } from 'debug')
+                  const binding = path.scope.getBinding(specifier.local.name)
+                  if (binding) {
+                    debugReferences.add(binding)
+                  }
                 }
               })
               pathsToRemove.add(path)
