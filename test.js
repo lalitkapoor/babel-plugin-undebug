@@ -205,6 +205,28 @@ test('babel-plugin-undebug', function () {
     '',
     'should remove alias that uses a member property'
   )
+
+  // Test multiple variable declarations
+  assertTransform(
+    `
+  import {debug as d} from "debug";
+  var a = d("a"), other = 123;
+  const x = d("x"), y = 456, z = d("z");
+  let p = d("p"), q = 789;
+  a("b");
+  x("test");
+  z("foo");
+  p("bar");
+  console.log(other, y, q);
+  `,
+    `
+  var other = 123;
+  const y = 456;
+  let q = 789;
+  console.log(other, y, q);
+  `,
+    'should handle multiple variable declarations, removing only debug-related ones'
+  )
 })
 
 /**

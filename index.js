@@ -36,7 +36,8 @@ export default function ({types: t}) {
               if (binding) {
                 debugReferences.add(binding)
               }
-              pathsToRemove.add(path.parentPath)
+              const pathToRemove = getVariablePathToRemove(path)
+              pathToRemove && pathsToRemove.add(pathToRemove)
             }
 
             // Handle require('debug')('something')
@@ -52,7 +53,8 @@ export default function ({types: t}) {
                 if (binding) {
                   debugReferences.add(binding)
                 }
-                pathsToRemove.add(path.parentPath)
+                const pathToRemove = getVariablePathToRemove(path)
+                pathToRemove && pathsToRemove.add(pathToRemove)
               }
             }
           },
@@ -76,132 +78,127 @@ export default function ({types: t}) {
               })
               pathsToRemove.add(path)
             }
-          }
-        })
+          },
 
-        // Keep iterating until we've found all debug-related references
-        let lastSize = 0
-        while (debugReferences.size > lastSize) {
-          lastSize = debugReferences.size
+          /**
+           * Handle identifier references to debug or debug-created functions
+           * Examples to be removed entirely:
+           * - log('message')               // direct call
+           * - const newLog = log           // aliasing
+           * - const sub = log.extend('sub') // method call assignment
+           *
+           * Examples where property access is replaced with undefined:
+           * - console.log(log.enabled)     // becomes console.log(undefined)
+           * - if (log.namespace === 'test') // becomes if (undefined === 'test')
+           */
+          Identifier(path) {
+            // Skip identifiers that are being declared
+            if (path.parentPath.isVariableDeclarator({id: path.node})) return
 
-          path.traverse({
-            /**
-             * Handle identifier references to debug or debug-created functions
-             * Examples to be removed entirely:
-             * - log('message')               // direct call
-             * - const newLog = log           // aliasing
-             * - const sub = log.extend('sub') // method call assignment
-             *
-             * Examples where property access is replaced with undefined:
-             * - console.log(log.enabled)     // becomes console.log(undefined)
-             * - if (log.namespace === 'test') // becomes if (undefined === 'test')
-             */
-            Identifier(path) {
-              // Skip identifiers that are being declared
-              if (path.parentPath.isVariableDeclarator({id: path.node})) return
+            const binding = path.scope.getBinding(path.node.name)
+            if (binding && debugReferences.has(binding)) {
+              // If it's used in a call
+              // e.g., debug('test'), log('message')
+              if (path.parentPath.isCallExpression({callee: path.node})) {
+                pathsToRemove.add(path.parentPath.parentPath)
+              }
 
-              const binding = path.scope.getBinding(path.node.name)
-              if (binding && debugReferences.has(binding)) {
-                // If it's used in a call
-                // e.g., debug('test'), log('message')
-                if (path.parentPath.isCallExpression({callee: path.node})) {
-                  pathsToRemove.add(path.parentPath.parentPath)
+              // If it's being assigned to another variable (aliased)
+              // e.g., const myDebug = debug, const log2 = log
+              const parentPath = path.parentPath
+              if (parentPath.isVariableDeclarator({init: path.node})) {
+                const newBinding = path.scope.getBinding(
+                  parentPath.node.id.name
+                )
+                if (newBinding) {
+                  debugReferences.add(newBinding)
                 }
+                const pathToRemove = getVariablePathToRemove(parentPath)
+                pathToRemove && pathsToRemove.add(pathToRemove)
+              }
 
-                // If it's being assigned to another variable (aliased)
-                // e.g., const myDebug = debug, const log2 = log
-                const parentPath = path.parentPath
-                if (parentPath.isVariableDeclarator({init: path.node})) {
-                  const newBinding = path.scope.getBinding(
-                    parentPath.node.id.name
+              // If it's used as object in a member expression
+              // e.g., debug.enable('ns'), log.namespace, debug.extend('sub')
+              if (path.parentPath.isMemberExpression({object: path.node})) {
+                const memberExp = path.parentPath
+
+                // Check if the member expression is part of a variable declaration
+                // e.g., const sub = log.extend, const ns = debug.namespace
+                const isInDeclaration = memberExp.findParent((p) =>
+                  p.isVariableDeclarator()
+                )
+
+                if (
+                  memberExp.parentPath.isCallExpression({
+                    callee: memberExp.node
+                  })
+                ) {
+                  // It's a method call (e.g., a.log())
+                  pathsToRemove.add(memberExp.parentPath.parentPath)
+                } else if (isInDeclaration) {
+                  // It's being assigned to a variable (e.g., var b = a.log)
+                  const declarator = isInDeclaration
+                  const newBinding = declarator.scope.getBinding(
+                    declarator.node.id.name
                   )
                   if (newBinding) {
                     debugReferences.add(newBinding)
                   }
-                  pathsToRemove.add(parentPath.parentPath)
-                }
-
-                // If it's used as object in a member expression
-                // e.g., debug.enable('ns'), log.namespace, debug.extend('sub')
-                if (path.parentPath.isMemberExpression({object: path.node})) {
-                  const memberExp = path.parentPath
-
-                  // Check if the member expression is part of a variable declaration
-                  // e.g., const sub = log.extend, const ns = debug.namespace
-                  const isInDeclaration = memberExp.findParent((p) =>
-                    p.isVariableDeclarator()
-                  )
-
-                  if (
-                    memberExp.parentPath.isCallExpression({
-                      callee: memberExp.node
-                    })
-                  ) {
-                    // It's a method call (e.g., a.log())
-                    pathsToRemove.add(memberExp.parentPath.parentPath)
-                  } else if (isInDeclaration) {
-                    // It's being assigned to a variable (e.g., var b = a.log)
-                    const declarator = isInDeclaration
-                    const newBinding = declarator.scope.getBinding(
-                      declarator.node.id.name
-                    )
-                    if (newBinding) {
-                      debugReferences.add(newBinding)
-                    }
-                    pathsToRemove.add(declarator.parentPath)
-                  } else {
-                    // It's used as a value (e.g., console.log(a.enabled))
-                    memberExp.replaceWith(t.identifier('undefined'))
-                  }
-                }
-              }
-            },
-
-            /**
-             * Handle function calls including:
-             * Examples to be removed entirely:
-             * - debug('app:log')             // direct debug call
-             * - log('message')               // call to debug function
-             * - log.extend('sub')('detail')  // chained calls
-             * - logger.log('test')           // method call
-             *
-             * Both the calls and their containing statements are removed.
-             */
-            CallExpression(path) {
-              const callee = path.get('callee')
-
-              // Handle direct calls
-              if (callee.isIdentifier()) {
-                const binding = path.scope.getBinding(callee.node.name)
-                if (binding && debugReferences.has(binding)) {
-                  const parent = path.parentPath
-                  if (parent.isVariableDeclarator()) {
-                    const newBinding = parent.scope.getBinding(
-                      parent.node.id.name
-                    )
-                    if (newBinding) {
-                      debugReferences.add(newBinding)
-                    }
-                    pathsToRemove.add(parent.parentPath)
-                  } else {
-                    pathsToRemove.add(path.parentPath)
-                  }
-                }
-              }
-
-              // Handle method calls
-              if (callee.isMemberExpression()) {
-                const object = callee.get('object')
-                if (object.isIdentifier()) {
-                  const binding = path.scope.getBinding(object.node.name)
-                  if (binding && debugReferences.has(binding)) {
-                    pathsToRemove.add(path.parentPath)
-                  }
+                  const pathToRemove = getVariablePathToRemove(declarator)
+                  pathToRemove && pathsToRemove.add(pathToRemove)
+                } else {
+                  // It's used as a value (e.g., console.log(a.enabled))
+                  memberExp.replaceWith(t.identifier('undefined'))
                 }
               }
             }
-          })
-        }
+          },
+
+          /**
+           * Handle function calls including:
+           * Examples to be removed entirely:
+           * - debug('app:log')             // direct debug call
+           * - log('message')               // call to debug function
+           * - log.extend('sub')('detail')  // chained calls
+           * - logger.log('test')           // method call
+           *
+           * Both the calls and their containing statements are removed.
+           */
+          CallExpression(path) {
+            const callee = path.get('callee')
+
+            // Handle direct calls
+            if (callee.isIdentifier()) {
+              const binding = path.scope.getBinding(callee.node.name)
+              if (binding && debugReferences.has(binding)) {
+                const parent = path.parentPath
+                if (parent.isVariableDeclarator()) {
+                  const newBinding = parent.scope.getBinding(
+                    parent.node.id.name
+                  )
+                  if (newBinding) {
+                    debugReferences.add(newBinding)
+                  }
+                  const pathToRemove = getVariablePathToRemove(parent)
+                  pathToRemove && pathsToRemove.add(pathToRemove)
+                } else {
+                  pathsToRemove.add(path.parentPath)
+                }
+              }
+            }
+
+            // Handle method calls
+            if (callee.isMemberExpression()) {
+              const object = callee.get('object')
+              if (object.isIdentifier()) {
+                const binding = path.scope.getBinding(object.node.name)
+                if (binding && debugReferences.has(binding)) {
+                  pathsToRemove.add(path.parentPath)
+                }
+              }
+            }
+          }
+        })
 
         // Remove all collected paths at the end
         for (const path of pathsToRemove) {
@@ -211,5 +208,28 @@ export default function ({types: t}) {
         }
       }
     }
+  }
+}
+
+/* Helper function to properly remove variable declarators.
+ *
+ * Handle both single and multiple variable declarations:
+ * - const log = debug("app:log");
+ * - const log = debug("app:log"), other = 123;
+ *
+ * VariableDeclaration    (const log = debug("app:log"), other = 123)
+ *   VariableDeclarator   (log = debug("app:log"))
+ *   VariableDeclarator   (other = 123)
+ */
+function getVariablePathToRemove(declarator) {
+  const variableDeclaration = declarator.parentPath
+
+  // If this is the only VariableDeclarator in the VariableDeclaration
+  if (variableDeclaration.node.declarations.length === 1) {
+    // Remove the entire VariableDeclaration (const/let/var statement)
+    return variableDeclaration
+  } else {
+    // Otherwise just remove this specific VariableDeclarator (a = 1)
+    return declarator
   }
 }
